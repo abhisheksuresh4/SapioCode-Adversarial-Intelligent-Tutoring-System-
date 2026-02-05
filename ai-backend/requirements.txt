@@ -1,0 +1,16 @@
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-dotenv==1.0.0
+pydantic==2.5.0
+pydantic-settings==2.1.0
+httpx==0.25.0
+openai==1.3.0
+
+# Phase 2: Socratic Tutoring
+langgraph==0.0.20
+langchain==0.1.0
+langchain-core==0.1.10
+
+# Phase 3: Viva Voce System
+python-multipart==0.0.6
+aiofiles==23.2.1
