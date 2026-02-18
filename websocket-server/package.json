@@ -1,0 +1,15 @@
+{
+    "name": "sapiocode-websocket-server",
+    "version": "1.0.0",
+    "description": "WebSocket server for SapioCode collaborative editing",
+    "main": "server.js",
+    "type": "module",
+    "scripts": {
+        "start": "node server.js",
+        "dev": "node server.js"
+    },
+    "dependencies": {
+        "ws": "^8.16.0",
+        "y-websocket": "^2.0.4"
+    }
+}
