@@ -30,8 +30,8 @@ async def lifespan(app: FastAPI):
 
     # ── Cache (Redis) ──
     try:
-        from app.db.redis_cache import get_redis
-        redis = get_redis()
+        from app.db.redis_cache import get_redis_cache
+        redis = get_redis_cache()
         await redis.connect()
         logger.info("✓ Redis connected")
     except Exception as e:
@@ -59,7 +59,8 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
     try:
-        redis = get_redis()
+        from app.db.redis_cache import get_redis_cache
+        redis = get_redis_cache()
         await redis.disconnect()
     except Exception:
         pass
@@ -122,9 +123,9 @@ async def health_check():
     checks = {"service": "ai-engine", "role": "AI Engineer (The Brain)"}
     # Optional: probe backing services
     try:
-        from app.db.redis_cache import get_redis
-        r = get_redis()
-        checks["redis"] = "connected" if r._redis else "unavailable"
+        from app.db.redis_cache import get_redis_cache
+        r = get_redis_cache()
+        checks["redis"] = "connected" if r._connected else "unavailable"
     except Exception:
         checks["redis"] = "unavailable"
     checks["status"] = "healthy"
