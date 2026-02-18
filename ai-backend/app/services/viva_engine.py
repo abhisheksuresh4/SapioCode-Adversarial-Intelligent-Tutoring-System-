@@ -147,52 +147,62 @@ class QuestionGenerator:
         num_questions: int = 3
     ) -> List[VivaQuestion]:
         """
-        Generate Viva questions based on code analysis.
-        
-        Args:
-            code: The student's submitted code
-            analysis: AST analysis result
-            num_questions: How many questions to generate
-            
-        Returns:
-            List of VivaQuestion objects
+        Generate Viva questions based on AST analysis.
+
+        Phase 3 upgrade: uses FunctionProfile (recursion, base case, loops,
+        param names), algorithm_pattern, concepts_detected and issue_locations
+        from the rich CodeAnalysisResult so every question is code-specific.
         """
         questions = []
         code_lines = code.split("\n")
-        
-        # Priority 1: Ask about functions (most important)
-        functions = analysis.code_structure.get("functions", [])
-        for func_name in functions[:2]:
-            q = self._create_function_question(func_name, code)
+
+        # ── Priority 1: Function-level questions (deep profile aware) ──
+        if hasattr(analysis, 'function_profiles') and analysis.function_profiles:
+            for fp in analysis.function_profiles[:2]:
+                q = self._create_function_question_from_profile(fp, code)
+                if q:
+                    questions.append(q)
+        else:
+            # Legacy fallback — code_structure dict
+            functions = analysis.code_structure.get("functions", [])
+            for func_name in functions[:2]:
+                q = self._create_function_question(func_name, code)
+                if q:
+                    questions.append(q)
+
+        # ── Priority 2: Algorithm-pattern question ─────────────────────
+        if hasattr(analysis, 'algorithm_pattern') and analysis.algorithm_pattern:
+            q = self._create_algorithm_pattern_question(analysis, code)
             if q:
                 questions.append(q)
-        
-        # Priority 2: Ask about loops (common confusion point)
-        if analysis.loop_count > 0:
+
+        # ── Priority 3: Issue-focused question (if any issues detected) ─
+        if hasattr(analysis, 'issue_locations') and analysis.issue_locations:
+            q = self._create_issue_question(analysis.issue_locations[0], code_lines)
+            if q:
+                questions.append(q)
+        elif analysis.loop_count > 0:
             q = self._create_loop_question(code_lines, analysis)
             if q:
                 questions.append(q)
-        
-        # Priority 3: Ask about key variables
+
+        # ── Priority 4: Variable / edge-case questions ─────────────────
         variables = self._extract_variables(code)
         for var in variables[:1]:
             q = self._create_variable_question(var, code)
             if q:
                 questions.append(q)
-        
-        # Priority 4: Edge case question (tests deep understanding)
+
         q = self._create_edge_case_question(code, analysis)
         if q:
             questions.append(q)
-        
-        # Shuffle and limit
+
+        # Shuffle, limit, assign IDs
         random.shuffle(questions)
         questions = questions[:num_questions]
-        
-        # Assign IDs
         for i, q in enumerate(questions):
             q.id = f"q{i+1}"
-        
+
         return questions
     
     def _create_function_question(self, func_name: str, code: str) -> Optional[VivaQuestion]:
@@ -300,8 +310,6 @@ class QuestionGenerator:
     def _infer_function_concepts(self, func_name: str, func_code: Optional[str]) -> List[str]:
         """Infer expected concepts from function name and code"""
         concepts = ["purpose", "input", "output", "logic"]
-        
-        # Add specific concepts based on function name
         name_lower = func_name.lower()
         if "sort" in name_lower:
             concepts.extend(["order", "compare"])
@@ -309,8 +317,132 @@ class QuestionGenerator:
             concepts.extend(["lookup", "match"])
         if "calculate" in name_lower or "compute" in name_lower:
             concepts.extend(["formula", "result"])
-        
         return concepts
+
+    # ── Phase 3 new helpers ─────────────────────────────────────
+
+    def _create_function_question_from_profile(self, fp, code: str) -> Optional[VivaQuestion]:
+        """Create a deep question using FunctionProfile (recursion / base case aware)."""
+        from app.services.code_analyzer import FunctionProfile
+        func_code = self._extract_function_code(code, fp.name)
+        params = ', '.join(fp.param_names) if fp.param_names else '...'
+
+        # Tailor the question based on detected structure
+        if fp.calls_itself and not fp.has_base_case:
+            q_text = (f"Your function `{fp.name}` calls itself but I don't see a clear base case. "
+                      f"What stops the recursion — what input makes it stop?")
+            concepts = ["recursion", "base_case", "termination", "infinite_recursion"]
+            difficulty = 3
+        elif fp.calls_itself:
+            q_text = (f"Walk me through how `{fp.name}({params})` works on a small example, "
+                      f"especially how and why the recursion stops.")
+            concepts = ["recursion", "base_case", "call_stack", "return_value"]
+            difficulty = 2
+        elif fp.loop_count and fp.loop_count > 0:
+            q_text = (f"Explain the loop inside `{fp.name}`. "
+                      f"What does it iterate over and what does it accumulate or change?")
+            concepts = ["iteration", "loop_body", "accumulation", "termination"]
+            difficulty = 2
+        elif not fp.has_return:
+            q_text = (f"Your function `{fp.name}` doesn't seem to return a value. "
+                      f"What is it supposed to produce and how does the caller get the result?")
+            concepts = ["return_value", "side_effects", "functions"]
+            difficulty = 2
+        else:
+            template = random.choice(self.TEMPLATES[QuestionType.FUNCTION_PURPOSE])
+            q_text = template.format(name=fp.name)
+            concepts = self._infer_function_concepts(fp.name, func_code)
+            difficulty = 1
+
+        return VivaQuestion(
+            id="",
+            question_type=QuestionType.FUNCTION_PURPOSE,
+            question_text=q_text,
+            target_code=func_code or f"def {fp.name}({params}): ...",
+            target_line=fp.start_line if hasattr(fp, 'start_line') else None,
+            expected_concepts=concepts,
+            difficulty=difficulty,
+        )
+
+    def _create_algorithm_pattern_question(
+        self, analysis: CodeAnalysisResult, code: str
+    ) -> Optional[VivaQuestion]:
+        """Ask about the algorithm choice based on detected pattern."""
+        from app.services.code_analyzer import AlgorithmPattern
+        pattern = analysis.algorithm_pattern
+        snippet = code.split("\n")[0].strip()
+
+        pattern_questions = {
+            AlgorithmPattern.RECURSIVE: (
+                "You chose a recursive approach here. "
+                "What are the advantages and risks of recursion for this problem?",
+                ["recursion", "stack_overflow", "base_case", "efficiency"]
+            ),
+            AlgorithmPattern.DYNAMIC_PROG: (
+                "Your solution looks like dynamic programming. "
+                "What sub-problem are you memoising and why does that help?",
+                ["memoization", "subproblem", "overlapping", "optimal_substructure"]
+            ),
+            AlgorithmPattern.TWO_POINTER: (
+                "You're using a two-pointer technique. "
+                "What invariant do your left and right pointers maintain?",
+                ["invariant", "convergence", "two_pointers", "linear_scan"]
+            ),
+            AlgorithmPattern.BRUTE_FORCE: (
+                "Your solution uses nested loops — a brute-force approach. "
+                "Can you estimate the time complexity and suggest a faster alternative?",
+                ["time_complexity", "nested_loops", "optimization"]
+            ),
+        }
+
+        default = (
+            f"Why did you choose this approach for the problem? "
+            f"Walk me through your reasoning.",
+            ["reasoning", "algorithm_choice", "correctness"]
+        )
+        q_text, concepts = pattern_questions.get(pattern, default)
+        # Add concepts_detected from AST as additional expected concepts
+        if hasattr(analysis, 'concepts_detected'):
+            concepts = list(set(concepts + analysis.concepts_detected))
+
+        return VivaQuestion(
+            id="",
+            question_type=QuestionType.WHY_CHOICE,
+            question_text=q_text,
+            target_code=snippet,
+            target_line=None,
+            expected_concepts=concepts,
+            difficulty=2,
+        )
+
+    def _create_issue_question(
+        self, issue_loc, code_lines: List[str]
+    ) -> Optional[VivaQuestion]:
+        """Generate a question directly targeting a detected code issue."""
+        line_num = issue_loc.line
+        snippet = ""
+        if line_num and 1 <= line_num <= len(code_lines):
+            snippet = code_lines[line_num - 1].strip()
+
+        q_text = (
+            f"I noticed something on line {line_num}: `{snippet}`. "
+            f"{issue_loc.description} "
+            f"Can you explain what this part is supposed to do?"
+        ) if line_num and snippet else (
+            f"I noticed a potential issue in your code: {issue_loc.description}. "
+            f"Can you walk me through your reasoning here?"
+        )
+
+        return VivaQuestion(
+            id="",
+            question_type=QuestionType.LINE_EXPLANATION,
+            question_text=q_text,
+            target_code=snippet or issue_loc.code_snippet or "",
+            target_line=line_num,
+            expected_concepts=[issue_loc.issue_type.value.replace('_', ' '),
+                                "correctness", "logic"],
+            difficulty=3,
+        )
 
 
 class SemanticVerifier:
@@ -326,10 +458,21 @@ class SemanticVerifier:
     
     VERIFICATION_PROMPT = """You are evaluating a student's verbal explanation of their code.
 
-CODE BEING DISCUSSED:
+FULL CODE SUBMITTED:
+```python
+{full_code}
+```
+
+CODE SEGMENT BEING DISCUSSED:
 ```python
 {code}
 ```
+
+AST ANALYSIS (ground truth about what the code actually does):
+  Algorithm pattern : {algorithm_pattern}
+  Concepts present  : {ast_concepts}
+  Function summary  : {function_summary}
+  Detected issues   : {detected_issues}
 
 QUESTION ASKED:
 {question}
@@ -340,20 +483,22 @@ STUDENT'S VERBAL RESPONSE (transcribed from audio):
 EXPECTED CONCEPTS TO COVER:
 {expected_concepts}
 
-Evaluate if the student understands their code. Consider:
-1. Do they explain the core logic correctly?
-2. Do they use appropriate terminology?
-3. Can they articulate what the code does (not just read it)?
-4. Do they understand WHY the code works?
+Evaluate if the student GENUINELY understands their code. The AST analysis above
+is the ground truth — use it to judge whether the student's explanation is accurate.
+Consider:
+1. Does their explanation match what the AST says the code actually does?
+2. Do they use appropriate terminology for the algorithm pattern?
+3. Can they articulate WHY the code works (not just read it line-by-line)?
+4. Are there any signs they did NOT write this code (vague, evasive, incorrect)?
 
 Respond in this exact JSON format:
 {{
-    "score": 0.0 to 1.0,
-    "matched_concepts": ["list", "of", "concepts", "they", "demonstrated"],
-    "missing_concepts": ["concepts", "they", "missed"],
-    "understanding_level": "strong" | "adequate" | "weak" | "none",
+    "score": 0.0,
+    "matched_concepts": ["concepts they correctly explained"],
+    "missing_concepts": ["concepts they missed or got wrong"],
+    "understanding_level": "strong | adequate | weak | none",
     "feedback": "Brief constructive feedback for the student",
-    "red_flags": ["any", "signs", "they", "didnt", "write", "this"]
+    "red_flags": ["any signs they didn't write this code"]
 }}
 """
     
@@ -364,56 +509,93 @@ Respond in this exact JSON format:
         self,
         question: VivaQuestion,
         answer: StudentAnswer,
-        full_code: str
+        full_code: str,
+        analysis: Optional["CodeAnalysisResult"] = None,
     ) -> AnswerEvaluation:
         """
         Verify if student's answer demonstrates understanding.
-        
-        Args:
-            question: The question that was asked
-            answer: Student's transcribed response
-            full_code: Complete code for context
-            
-        Returns:
-            AnswerEvaluation with score and feedback
+
+        Phase 3 upgrade: if `analysis` (CodeAnalysisResult) is provided, the
+        verification prompt is enriched with AST ground-truth so the LLM can
+        judge accuracy against WHAT THE CODE ACTUALLY DOES.
         """
+        # Build the enriched AST context strings (Phase 3)
+        if analysis is not None:
+            algorithm_pattern = getattr(analysis, 'algorithm_pattern', None)
+            ap_str = algorithm_pattern.value if algorithm_pattern else "unknown"
+            ast_concepts = ", ".join(getattr(analysis, 'concepts_detected', []) or ["N/A"])
+            fn_profiles = getattr(analysis, 'function_profiles', [])
+            fn_summary = "; ".join(
+                f"{fp.name}({'recursive' if fp.calls_itself else 'iterative'}, "
+                f"{'has base case' if fp.has_base_case else 'NO base case'})"
+                for fp in fn_profiles
+            ) if fn_profiles else "N/A"
+            issue_locs = getattr(analysis, 'issue_locations', [])
+            issues_str = "; ".join(
+                f"{loc.issue_type.value} at line {loc.line}: {loc.description}"
+                for loc in issue_locs
+            ) if issue_locs else "none detected"
+        else:
+            ap_str = "unknown"
+            ast_concepts = "N/A"
+            fn_summary = "N/A"
+            issues_str = "N/A"
+
         prompt = self.VERIFICATION_PROMPT.format(
+            full_code=full_code,
             code=question.target_code or full_code,
+            algorithm_pattern=ap_str,
+            ast_concepts=ast_concepts,
+            function_summary=fn_summary,
+            detected_issues=issues_str,
             question=question.question_text,
             response=answer.transcribed_text,
-            expected_concepts=", ".join(question.expected_concepts)
+            expected_concepts=", ".join(question.expected_concepts),
         )
-        
+
         try:
             # Get LLM evaluation
             result = await self.groq.chat_completion(
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are an expert programming instructor evaluating student understanding. Be fair but thorough."
+                        "content": (
+                            "You are an expert programming instructor evaluating student "
+                            "understanding. Use the AST analysis as ground truth. Be fair but thorough."
+                        ),
                     },
-                    {"role": "user", "content": prompt}
+                    {"role": "user", "content": prompt},
                 ],
-                response_format={"type": "json_object"}
+                response_format={"type": "json_object"},
             )
-            
+
             # Parse JSON response
             import json
             evaluation = json.loads(result)
-            
+
             return AnswerEvaluation(
                 question_id=question.id,
                 score=float(evaluation.get("score", 0.5)),
                 matched_concepts=evaluation.get("matched_concepts", []),
                 missing_concepts=evaluation.get("missing_concepts", []),
                 feedback=evaluation.get("feedback", ""),
-                is_acceptable=float(evaluation.get("score", 0)) >= 0.5
+                is_acceptable=float(evaluation.get("score", 0)) >= 0.5,
             )
-            
-        except Exception as e:
+
+        except Exception:
             # Fallback to basic keyword matching if LLM fails
             return self._fallback_verification(question, answer)
-    
+
+    async def verify_answer_with_ast(
+        self,
+        question: VivaQuestion,
+        answer: StudentAnswer,
+        full_code: str,
+        analysis: "CodeAnalysisResult",
+    ) -> AnswerEvaluation:
+        """Convenience wrapper — always uses the rich AST path."""
+        return await self.verify_answer(question, answer, full_code, analysis)
+
     def _fallback_verification(
         self,
         question: VivaQuestion,
@@ -441,6 +623,117 @@ Respond in this exact JSON format:
             feedback="Basic evaluation: Check if you covered all key concepts.",
             is_acceptable=score >= 0.5
         )
+
+    # ── Deterministic concept-overlap scoring ─────────────────────
+
+    def compute_concept_overlap(
+        self,
+        analysis: "CodeAnalysisResult",
+        transcribed_text: str,
+    ) -> dict:
+        """
+        Deterministic AST-vs-transcript concept comparison (FR-9).
+
+        Step 1: Extract key concepts from AST analysis
+        Step 2: Extract claimed concepts from student's transcript
+        Step 3: Compute overlap score (Jaccard-like)
+
+        Returns:
+            {
+                "ast_concepts": [...],
+                "claimed_concepts": [...],
+                "matched": [...],
+                "missed": [...],
+                "overlap_score": float (0-1),
+                "confidence": "high" | "medium" | "low"
+            }
+        """
+        import re
+
+        # Step 1: Ground-truth concepts from AST
+        ast_concepts = set()
+        if hasattr(analysis, 'concepts_detected') and analysis.concepts_detected:
+            ast_concepts.update(c.lower() for c in analysis.concepts_detected)
+        if hasattr(analysis, 'algorithm_pattern') and analysis.algorithm_pattern:
+            ast_concepts.add(analysis.algorithm_pattern.value.lower())
+        for fp in getattr(analysis, 'function_profiles', []):
+            if fp.calls_itself:
+                ast_concepts.add("recursion")
+            if fp.has_base_case:
+                ast_concepts.add("base case")
+            if fp.loop_count and fp.loop_count > 0:
+                ast_concepts.add("iteration")
+        for ds in getattr(analysis, 'data_structures_used', []):
+            ast_concepts.add(ds.lower())
+        for loc in getattr(analysis, 'issue_locations', []):
+            ast_concepts.add(loc.issue_type.value.replace("_", " "))
+
+        if not ast_concepts:
+            ast_concepts = {"general programming"}
+
+        # Step 2: Extract claimed concepts from transcript
+        transcript_lower = transcribed_text.lower()
+        # Concept synonyms to improve matching
+        SYNONYMS = {
+            "recursion": ["recursion", "recursive", "calls itself", "self-call"],
+            "base case": ["base case", "base-case", "stopping condition", "termination", "base condition"],
+            "iteration": ["loop", "iterate", "for loop", "while loop", "iteration", "iterating"],
+            "loops": ["loop", "for", "while", "iterate", "looping"],
+            "functions": ["function", "method", "def", "subroutine"],
+            "conditionals": ["if", "else", "condition", "conditional", "branch"],
+            "list": ["list", "array", "elements"],
+            "dict": ["dictionary", "dict", "hash map", "key-value", "mapping"],
+            "set": ["set", "unique", "distinct"],
+            "tree": ["tree", "node", "binary tree", "bst"],
+            "stack": ["stack", "lifo", "push", "pop"],
+            "queue": ["queue", "fifo", "enqueue", "dequeue"],
+            "sorting": ["sort", "sorting", "order", "sorted"],
+            "searching": ["search", "find", "lookup", "binary search"],
+            "dynamic_programming": ["dynamic programming", "dp", "memoization", "memo", "tabulation"],
+            "divide_and_conquer": ["divide and conquer", "split", "merge", "halving"],
+            "two_pointers": ["two pointer", "two-pointer", "left right", "converge"],
+            "time_complexity": ["time complexity", "big o", "o(n)", "efficiency", "complexity"],
+            "brute_force": ["brute force", "nested loop", "n squared", "naive"],
+            "missing base case": ["base case", "missing base", "no base case"],
+            "no termination": ["infinite loop", "doesn't stop", "no termination", "never ends"],
+            "missing return": ["no return", "missing return", "doesn't return"],
+        }
+
+        claimed_concepts = set()
+        for concept in ast_concepts:
+            synonyms = SYNONYMS.get(concept, [concept])
+            for synonym in synonyms:
+                if synonym in transcript_lower:
+                    claimed_concepts.add(concept)
+                    break
+            # Also try the concept itself if not in synonym map
+            if concept not in claimed_concepts and concept in transcript_lower:
+                claimed_concepts.add(concept)
+
+        # Step 3: Compute overlap
+        matched = ast_concepts & claimed_concepts
+        missed = ast_concepts - claimed_concepts
+        overlap_score = len(matched) / max(len(ast_concepts), 1)
+
+        # Confidence based on transcript length and match quality
+        word_count = len(transcript_lower.split())
+        if word_count < 10:
+            confidence = "low"
+        elif overlap_score >= 0.6 and word_count >= 30:
+            confidence = "high"
+        elif overlap_score >= 0.3:
+            confidence = "medium"
+        else:
+            confidence = "low"
+
+        return {
+            "ast_concepts": sorted(ast_concepts),
+            "claimed_concepts": sorted(claimed_concepts),
+            "matched": sorted(matched),
+            "missed": sorted(missed),
+            "overlap_score": round(overlap_score, 3),
+            "confidence": confidence,
+        }
 
 
 class VivaEngine:
@@ -549,11 +842,12 @@ class VivaEngine:
         )
         session.answers.append(answer)
         
-        # Evaluate the answer
+        # Evaluate the answer — pass full AST analysis for Phase 3 enriched verification
         evaluation = await self.verifier.verify_answer(
             current_question,
             answer,
-            session.code
+            session.code,
+            session.analysis,
         )
         session.evaluations.append(evaluation)
         
@@ -604,6 +898,10 @@ class VivaEngine:
             "average_score": round(avg_score, 2),
             "message": message,
             "questions_answered": len(session.evaluations),
+            "concept_overlap": self.verifier.compute_concept_overlap(
+                session.analysis,
+                " ".join(a.transcribed_text for a in session.answers),
+            ),
             "question_breakdown": [
                 {
                     "question": session.questions[i].question_text,

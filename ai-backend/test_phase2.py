@@ -1,6 +1,6 @@
 """Test Phase 2 Components"""
 import sys
-sys.path.insert(0, 'd:\\sapiocode\\ai-backend')
+sys.path.insert(0, 'd:\\cognicode\\ai-backend')
 
 from app.services.code_analyzer import CodeAnalyzer
 from app.services.tutoring_engine import TutoringEngine, StudentContext, HintLevel

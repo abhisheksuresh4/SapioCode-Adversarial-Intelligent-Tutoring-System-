@@ -9,6 +9,7 @@ from app.services.tutoring_engine import (
     HintGenerator,
     StudentContext
 )
+from app.services.problem_generator import get_problem_generator
 
 
 router = APIRouter()
@@ -52,6 +53,21 @@ class InterventionCheckRequest(BaseModel):
     frustration_level: float = 0.0
     previous_hints: int = 0
     code_attempts: int = 0
+
+
+class GenerateProblemRequest(BaseModel):
+    """Request to generate a new problem from description"""
+    raw_description: str = Field(..., description="Natural language problem description")
+    language: str = Field(default="python", description="Target programming language")
+    difficulty: str = Field(default="medium", description="Problem difficulty: easy, medium, hard")
+    num_test_cases: int = Field(default=5, ge=3, le=10, description="Number of test cases")
+
+
+class AdditionalTestCasesRequest(BaseModel):
+    """Request to generate additional test cases"""
+    problem_description: str
+    existing_test_cases: list
+    num_additional: int = Field(default=3, ge=1, le=5)
 
 
 @router.post("/test")
@@ -275,4 +291,122 @@ async def check_intervention_needed(request: InterventionCheckRequest):
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Intervention Check Error: {str(e)}")
+
+
+# ===== PROBLEM GENERATOR ENDPOINTS (Teacher Tools) =====
+
+@router.post("/generate-problem")
+async def generate_problem(request: GenerateProblemRequest):
+    """
+    Generate a structured programming problem from natural language description.
+    
+    This is the "Teacher Tool" endpoint - allows educators to quickly create
+    curriculum content by describing problems in plain English.
+    
+    **Example Request:**
+    ```json
+    {
+        "raw_description": "Create a function that finds the longest palindrome substring in a given string",
+        "language": "python",
+        "difficulty": "medium",
+        "num_test_cases": 5
+    }
+    ```
+    
+    **Returns:**
+    - Complete problem specification with:
+        - Formal problem statement
+        - Starter code template
+        - Test cases (visible + hidden)
+        - Socratic-style hints
+        - Concepts covered
+    """
+    try:
+        generator = get_problem_generator()
+        
+        problem_spec = await generator.generate_problem_from_text(
+            raw_description=request.raw_description,
+            language=request.language,
+            difficulty=request.difficulty,
+            num_test_cases=request.num_test_cases
+        )
+        
+        return {
+            "success": True,
+            "problem": {
+                "title": problem_spec.title,
+                "description": problem_spec.description,
+                "difficulty": problem_spec.difficulty,
+                "concepts": problem_spec.concepts,
+                "starter_code": problem_spec.starter_code,
+                "solution_template": problem_spec.solution_template,
+                "test_cases": [
+                    {
+                        "input": tc.input,
+                        "expected_output": tc.expected_output,
+                        "explanation": tc.explanation,
+                        "is_hidden": tc.is_hidden
+                    }
+                    for tc in problem_spec.test_cases
+                ],
+                "hints": problem_spec.hints,
+                "time_limit_seconds": problem_spec.time_limit_seconds,
+                "memory_limit_mb": problem_spec.memory_limit_mb
+            }
+        }
+    
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Problem Generation Error: {str(e)}")
+
+
+@router.post("/generate-test-cases")
+async def generate_additional_test_cases(request: AdditionalTestCasesRequest):
+    """
+    Generate additional test cases for an existing problem.
+    
+    Useful when you need more edge case coverage or want to expand
+    the test suite after the initial problem creation.
+    
+    **Returns:**
+    - List of new test cases (typically marked as hidden for evaluation)
+    """
+    try:
+        generator = get_problem_generator()
+        
+        # Convert existing test cases to TestCase objects
+        from app.services.problem_generator import TestCase
+        existing = [
+            TestCase(
+                input=tc["input"],
+                expected_output=tc["expected_output"],
+                explanation=tc.get("explanation", ""),
+                is_hidden=tc.get("is_hidden", False)
+            )
+            for tc in request.existing_test_cases
+        ]
+        
+        new_cases = await generator.generate_additional_test_cases(
+            problem_description=request.problem_description,
+            existing_test_cases=existing,
+            num_additional=request.num_additional
+        )
+        
+        return {
+            "success": True,
+            "new_test_cases": [
+                {
+                    "input": tc.input,
+                    "expected_output": tc.expected_output,
+                    "explanation": tc.explanation,
+                    "is_hidden": tc.is_hidden
+                }
+                for tc in new_cases
+            ]
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Test Case Generation Error: {str(e)}")
+
 

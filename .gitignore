@@ -11,32 +11,32 @@ venv/
 env/
 ENV/
 .venv
-
-# Environment Variables (CRITICAL - DO NOT PUSH!)
+# Environment Variables
 .env
 *.env
 !.env.example
-
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
-
+# Dependencies (Node)
+node_modules/
+dist-ssr/
+*.local
 # OS
 .DS_Store
 Thumbs.db
-
 # Logs
 *.log
 logs/
-
+npm-debug.log*
+yarn-debug.log*
 # Test cache
 .pytest_cache/
 .coverage
-
 # Temporary files
 *.tmp
 *.temp
-test.http
-*.http
+# SQLite databases
+*.db

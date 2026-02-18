@@ -1,0 +1,13 @@
+# SapioCode AI Backend - Docker ignore
+__pycache__/
+*.py[cod]
+*.db
+.env
+.venv/
+venv/
+.pytest_cache/
+.git/
+.gitignore
+*.md
+tests/
+prototypes/

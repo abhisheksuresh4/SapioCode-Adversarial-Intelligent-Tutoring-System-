@@ -1,0 +1,152 @@
+### Test Root Endpoint
+GET http://localhost:8000/
+
+###
+
+### Test Health Check
+GET http://localhost:8000/health
+
+###
+
+### Check AI Configuration Status
+GET http://localhost:8000/api/ai/status
+
+###
+
+### ===== PHASE 1: BASIC ENDPOINTS =====
+
+### Test AI Basic - Simple Question
+POST http://localhost:8000/api/ai/test
+Content-Type: application/json
+
+{
+    "message": "Explain recursion in one sentence"
+}
+
+###
+
+### Test Hint Generation - Linked List Problem
+POST http://localhost:8000/api/ai/hint
+Content-Type: application/json
+
+{
+    "problem_description": "Write a function to reverse a singly linked list in-place",
+    "student_code": "def reverse(head):\n    return head",
+    "stuck_duration": 120
+}
+
+###
+
+### ===== PHASE 2: CODE ANALYSIS =====
+
+### Analyze Valid Python Code
+POST http://localhost:8000/api/ai/analyze
+Content-Type: application/json
+
+{
+    "code": "def factorial(n):\n    if n <= 1:\n        return 1\n    return n * factorial(n-1)",
+    "language": "python"
+}
+
+###
+
+### Analyze Code with Issues
+POST http://localhost:8000/api/ai/analyze
+Content-Type: application/json
+
+{
+    "code": "def find_max(arr):\n    max = arr[0]\n    for i in arr:\n        if i > max:\n            max = i",
+    "language": "python"
+}
+
+###
+
+### Analyze Code with Syntax Error
+POST http://localhost:8000/api/ai/analyze
+Content-Type: application/json
+
+{
+    "code": "def broken(\n    return 5",
+    "language": "python"
+}
+
+###
+
+### ===== PHASE 2: SMART HINTS =====
+
+### Smart Hint - Low Frustration (Socratic)
+POST http://localhost:8000/api/ai/hint/smart
+Content-Type: application/json
+
+{
+    "problem_description": "Write a function to reverse a linked list",
+    "student_code": "def reverse(head):\n    return head",
+    "time_stuck": 45,
+    "frustration_level": 0.2,
+    "previous_hints_count": 0,
+    "code_attempts": 2
+}
+
+###
+
+### Smart Hint - Medium Frustration (Conceptual)
+POST http://localhost:8000/api/ai/hint/smart
+Content-Type: application/json
+
+{
+    "problem_description": "Write a function to find the maximum sum of any contiguous subarray (Kadane's Algorithm)",
+    "student_code": "def max_subarray(arr):\n    max_sum = 0\n    for i in range(len(arr)):\n        max_sum = max(max_sum, arr[i])\n    return max_sum",
+    "time_stuck": 120,
+    "frustration_level": 0.6,
+    "previous_hints_count": 1,
+    "code_attempts": 5
+}
+
+###
+
+### Smart Hint - High Frustration (Direct)
+POST http://localhost:8000/api/ai/hint/smart
+Content-Type: application/json
+
+{
+    "problem_description": "Implement a binary search tree insertion",
+    "student_code": "def insert(root, val):\n    # I don't know how to start",
+    "time_stuck": 240,
+    "frustration_level": 0.85,
+    "previous_hints_count": 3,
+    "code_attempts": 8
+}
+
+###
+
+### ===== PHASE 2: INTERVENTION CHECKING =====
+
+### Check Intervention - Not Needed
+POST http://localhost:8000/api/ai/intervention/check
+Content-Type: application/json
+
+{
+    "problem_description": "Write a function to check if a string is a palindrome",
+    "student_code": "def is_palindrome(s):\n    return s == s[::-1]",
+    "time_stuck": 15,
+    "frustration_level": 0.1,
+    "previous_hints": 0,
+    "code_attempts": 1
+}
+
+###
+
+### Check Intervention - Needed
+POST http://localhost:8000/api/ai/intervention/check
+Content-Type: application/json
+
+{
+    "problem_description": "Implement quicksort algorithm",
+    "student_code": "def quicksort(arr):\n    # stuck",
+    "time_stuck": 180,
+    "frustration_level": 0.7,
+    "previous_hints": 2,
+    "code_attempts": 6
+}
+
+###

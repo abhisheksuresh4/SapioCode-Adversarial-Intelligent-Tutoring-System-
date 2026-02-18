@@ -1,8 +1,14 @@
 """Socratic Tutoring Engine - Decides when and how to intervene"""
+from __future__ import annotations
+
 from enum import Enum
-from typing import Dict, Any, Optional
-from dataclasses import dataclass
-from datetime import datetime
+from typing import Dict, Any, Optional, List, TYPE_CHECKING
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+
+if TYPE_CHECKING:
+    from app.services.code_analyzer import CodeAnalysisResult
+    from app.services.ast_tutor import TutoringContext
 
 
 class TutoringState(Enum):
@@ -193,48 +199,172 @@ class TutoringEngine:
 
 
 class HintGenerator:
-    """Generates hints at different levels using Groq"""
-    
+    """
+    Generates Socratic hints using deep AST context + conversation memory.
+
+    Phase 2 upgrade:
+    - Accepts a full CodeAnalysisResult (not just a shallow dict)
+    - Uses ASTTutor to identify the best teaching moment
+    - Injects conversation history for multi-turn dialogue
+    - Produces code-SPECIFIC questions referencing real variable names + line numbers
+    """
+
     def __init__(self, groq_service):
         self.groq = groq_service
-    
+        # Lazy import to avoid circular dependency
+        from app.services.ast_tutor import ASTTutor, ConversationMemory
+        self._ast_tutor = ASTTutor()
+        self._memory = ConversationMemory(max_turns=20)
+
+    # ── Main entry point ──────────────────────────────────────────
+
     async def generate_hint(
         self,
         level: HintLevel,
         problem: str,
         code: str,
-        analysis: Dict[str, Any]
+        analysis,  # CodeAnalysisResult | dict — both supported
     ) -> str:
         """
-        Generate a hint at the specified level
-        
-        Args:
-            level: Hint level (Socratic to Direct)
-            problem: Problem description
-            code: Student's current code
-            analysis: Code analysis results
-            
-        Returns:
-            Generated hint string
+        Generate a hint at the specified level.
+        Works with BOTH:
+          - new CodeAnalysisResult (Phase 2 deep analysis)
+          - old dict (legacy callers — falls back gracefully)
         """
-        prompt = self._build_prompt(level, problem, code, analysis)
-        
-        messages = [
-            {
-                "role": "system",
-                "content": self._get_system_prompt(level)
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
+        # If we received a proper CodeAnalysisResult, use deep path
+        from app.services.code_analyzer import CodeAnalysisResult as CAR
+        if isinstance(analysis, CAR):
+            return await self._generate_deep_hint(level, problem, code, analysis)
+
+        # Legacy fallback (dict-based)
+        return await self._generate_legacy_hint(level, problem, code, analysis)
+
+    async def generate_hint_for_student(
+        self,
+        student_id: str,
+        level: HintLevel,
+        problem: str,
+        code: str,
+        analysis,
+    ) -> str:
+        """
+        Generate a hint WITH conversation memory tracking.
+        Use this instead of generate_hint when you have a student_id.
+        """
+        from app.services.code_analyzer import CodeAnalysisResult as CAR
+        history = self._memory.get_history(student_id, last_n=6)
+
+        if isinstance(analysis, CAR):
+            # Build full tutoring context with conversation history
+            ctx = self._ast_tutor.build_context(
+                analysis, code, problem, history
+            )
+            hint = await self._invoke_llm_with_context(ctx, level.value)
+        else:
+            hint = await self._generate_legacy_hint(level, problem, code, analysis)
+
+        # Record this turn
+        from app.services.ast_tutor import ConversationTurn
+        self._memory.add_turn(student_id, ConversationTurn(
+            role="tutor",
+            content=hint,
+            hint_level=level.value,
+            teaching_focus=self._get_focus(analysis),
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        ))
+
+        return hint
+
+    def record_student_message(self, student_id: str, message: str) -> None:
+        """Record a student's message (code submission, question) into memory."""
+        from app.services.ast_tutor import ConversationTurn
+        self._memory.add_turn(student_id, ConversationTurn(
+            role="student",
+            content=message,
+            hint_level=0,
+            teaching_focus="",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        ))
+
+    def get_conversation_summary(self, student_id: str) -> Dict[str, Any]:
+        return self._memory.summary(student_id)
+
+    def get_hint_count(self, student_id: str) -> int:
+        return self._memory.get_hint_count(student_id)
+
+    # ── Deep path (Phase 2) ───────────────────────────────────────
+
+    async def _generate_deep_hint(
+        self,
+        level: HintLevel,
+        problem: str,
+        code: str,
+        analysis,  # CodeAnalysisResult
+    ) -> str:
+        ctx = self._ast_tutor.build_context(analysis, code, problem)
+        return await self._invoke_llm_with_context(ctx, level.value)
+
+    async def _invoke_llm_with_context(
+        self,
+        ctx: "TutoringContext",
+        hint_level: int,
+    ) -> str:
+        """Invoke the LLM with the full tutoring context."""
+        user_prompt = ctx.to_llm_prompt(hint_level)
+
+        messages: List[Dict[str, str]] = [
+            {"role": "system", "content": self._get_system_prompt_deep(hint_level)}
         ]
-        
+
+        # Inject last few conversation turns BEFORE the current prompt
+        if ctx.conversation_history:
+            messages.extend(ctx.conversation_history)
+
+        messages.append({"role": "user", "content": user_prompt})
+
         response = await self.groq.chat_completion(messages, temperature=0.7)
         return response
-    
+
+    def _get_system_prompt_deep(self, level: int) -> str:
+        base = (
+            "You are SapioCode, an intelligent Socratic coding tutor. "
+            "You have been given a deep AST analysis of the student's code. "
+            "Always reference SPECIFIC elements from their code (function names, "
+            "variable names, line numbers) — never give generic advice. "
+        )
+        level_addons = {
+            1: "Ask ONE concise guiding question. Never give the answer or show code.",
+            2: "Point to the relevant concept with a brief example unrelated to their problem.",
+            3: "Give structural pseudo-code guidance. Use their actual variable/function names.",
+            4: "Be explicit. You may show a partial code snippet with blanks (`____`) for them to fill.",
+        }
+        return base + level_addons.get(level, level_addons[1])
+
+    # ── Legacy fallback ───────────────────────────────────────────
+
+    async def _generate_legacy_hint(
+        self,
+        level: HintLevel,
+        problem: str,
+        code: str,
+        analysis: Dict[str, Any],
+    ) -> str:
+        prompt = self._build_legacy_prompt(level, problem, code, analysis)
+        messages = [
+            {"role": "system", "content": self._get_system_prompt(level)},
+            {"role": "user", "content": prompt},
+        ]
+        return await self.groq.chat_completion(messages, temperature=0.7)
+
+    def _get_focus(self, analysis) -> str:
+        from app.services.code_analyzer import CodeAnalysisResult as CAR
+        if isinstance(analysis, CAR) and analysis.issue_locations:
+            return analysis.issue_locations[0].issue_type.value
+        return "general"
+
+    # ── Old system prompt kept for backward compat ────────────────
+
     def _get_system_prompt(self, level: HintLevel) -> str:
-        """Get system prompt based on hint level"""
         prompts = {
             HintLevel.SOCRATIC_QUESTION: (
                 "You are a Socratic tutor. Ask guiding questions that make the student "
@@ -254,18 +384,17 @@ class HintGenerator:
                 "You are a supportive coding instructor. The student is very stuck. "
                 "Provide more explicit guidance, possibly with code snippets, but still "
                 "leave some gaps for them to fill."
-            )
+            ),
         }
         return prompts.get(level, prompts[HintLevel.SOCRATIC_QUESTION])
-    
-    def _build_prompt(
+
+    def _build_legacy_prompt(
         self,
         level: HintLevel,
         problem: str,
         code: str,
-        analysis: Dict[str, Any]
+        analysis: Dict[str, Any],
     ) -> str:
-        """Build the hint generation prompt"""
         prompt = f"""PROBLEM:
 {problem}
 
@@ -280,7 +409,6 @@ CODE ANALYSIS:
 - Issues detected: {', '.join(str(i) for i in analysis.get('issues', []))}
 
 The student appears to be stuck. """
-        
         if level == HintLevel.SOCRATIC_QUESTION:
             prompt += "Ask ONE guiding question that will help them think about the next step."
         elif level == HintLevel.CONCEPTUAL_NUDGE:
@@ -289,5 +417,5 @@ The student appears to be stuck. """
             prompt += "Provide pseudo-code or algorithmic steps they should follow."
         else:
             prompt += "Give them explicit guidance to help them make progress."
-        
         return prompt
+

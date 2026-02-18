@@ -110,6 +110,39 @@ The question should make them think about their approach without revealing the a
         
         return await self.chat_completion(messages, temperature=0.8)
     
+    async def generate_structured_response(
+        self,
+        prompt: str,
+        system_prompt: str = "You are a helpful assistant.",
+        temperature: float = 0.7,
+        max_tokens: int = 2000
+    ) -> str:
+        """
+        Generate a structured (JSON) response from the LLM.
+
+        Convenience wrapper around chat_completion that sets up
+        system/user messages and requests JSON output format.
+
+        Args:
+            prompt: The user prompt describing what to generate
+            system_prompt: System-level instruction for the model
+            temperature: Randomness (0-2)
+            max_tokens: Max response length
+
+        Returns:
+            Raw AI response text (expected to contain JSON)
+        """
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt}
+        ]
+        return await self.chat_completion(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format={"type": "json_object"}
+        )
+
     async def close(self):
         """Close the HTTP client"""
         await self.client.aclose()
